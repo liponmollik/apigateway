@@ -1,8 +1,11 @@
-package Authentication
+package authentication
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -17,7 +20,7 @@ type User struct {
 	AddrID              *string    `json:"addressId,omitempty" db:"address_id"` // Nullable
 	AccountNumber       int64      `json:"accountNo" db:"account_no"`
 	DistributorID       int        `json:"userDistributorId" db:"user_distributor_id"`
-	PhoneNo             int        `json:"userPhoneNo" db:"user_phone_no"`
+	PhoneNo             string     `json:"userPhoneNo" db:"user_phone_no"`
 	EmailAddress        *string    `json:"userEmailAddress,omitempty" db:"user_email_address"` // Nullable
 	SystemName          *string    `json:"uName,omitempty" db:"user_system_name"`              // Nullable
 	Group               int        `json:"userGroup" db:"user_group"`
@@ -64,19 +67,24 @@ type Role struct {
 	RoleName string `json:"role_name"`
 }
 
-// Validate validates user data before saving to the database.
-func (u *User) Validate() error {
-	if !ValidatePhoneNumber(u.PhoneNo) {
-		return errors.New("invalid phone number")
-	}
-	if !isValidEmail(u.UserEmailAddress) {
-		return errors.New("invalid email format")
-	}
-	if len(u.UserPassword) < 8 {
-		return errors.New("password must be at least 8 characters")
-	}
-	return nil
+// Response structure to send JSON responses
+type Response struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data"`
 }
+
+var req struct {
+	UserAccount   int    `json:"user_account"`
+	UserPhone     int    `json:"Phone"`
+	UserPin       int    `json:"user_pin"`
+	UserPassword  string `json:"password"`
+	loginModeType string `json:"loginModeType"` // "mobile" or "desktop"
+	apiKEY        string `json:"uAPIKey"`
+}
+
+// SetPassword hashes and stores the password
+var encryptedPassword string
 
 // isValidEmail checks if the provided email is in a valid format.
 func isValidEmail(email string) bool {
@@ -85,21 +93,62 @@ func isValidEmail(email string) bool {
 	return re.MatchString(email)
 }
 
-// VerifyPassword checks if the provided password matches the user's password.
-func (u *User) VerifyPassword(password string) bool {
-	// Check password validity
+func setPassword(password string) error {
 	if !isValidPassword(password) {
-		return false
+		return errors.New("invalid password format")
 	}
+	encryptedPassword = hashAndExtract(password)
+	return nil
+}
 
-	// Implement hashing verification here (use bcrypt or similar)
-	// For demonstration, assuming plain text matching for hashed passwords.
-	return u.UserPassword == password // Replace with actual hash comparison
+// GetPassword retrieves the stored password (hashed value)
+func getPassword() (string, error) {
+	if encryptedPassword == "" {
+		return "", errors.New("no password is set")
+	}
+	return encryptedPassword, nil
+}
+
+// SetPIN hashes and stores the PIN
+var encryptedPIN string
+
+func setPIN(pin int) error {
+	pinStr := fmt.Sprintf("%05d", pin) // Ensure PIN is 5 digits
+	if !isValidPIN(pinStr) {
+		return errors.New("invalid PIN format")
+	}
+	encryptedPIN = hashAndExtract(pinStr)
+	return nil
+}
+
+// GetPIN retrieves the stored PIN (hashed value)
+func getPIN() (string, error) {
+	if encryptedPIN == "" {
+		return "", errors.New("no PIN is set")
+	}
+	return encryptedPIN, nil
+}
+
+// Encrypt and substring
+func hashAndExtract(password string) string {
+	// Hash the password using SHA-256
+	hasher := sha256.New()
+	hasher.Write([]byte(password))
+	hashed := hasher.Sum(nil)
+
+	// Convert the hashed bytes to a hex string
+	hashedHex := hex.EncodeToString(hashed)
+
+	// Extract the last 8 characters
+	if len(hashedHex) < 8 {
+		return hashedHex // Fallback in case the hash is unexpectedly short
+	}
+	return hashedHex[len(hashedHex)-8:]
 }
 
 // isValidPassword checks if the password meets the criteria.
 func isValidPassword(password string) bool {
-	if len(password) != 6 {
+	if len(password) < 8 { // Updated length validation for better security
 		return false
 	}
 
@@ -112,18 +161,24 @@ func isValidPassword(password string) bool {
 	specialChars := "!@#$%^&*()-_=+[]{}|;:,.<>?"
 
 	for _, ch := range password {
-		if unicode.IsUpper(ch) {
+		switch {
+		case unicode.IsUpper(ch):
 			hasUpper = true
-		} else if unicode.IsLower(ch) {
+		case unicode.IsLower(ch):
 			hasLower = true
-		} else if unicode.IsDigit(ch) {
+		case unicode.IsDigit(ch):
 			hasDigit = true
-		} else if contains(specialChars, ch) {
+		case strings.ContainsRune(specialChars, ch):
 			hasSpecial = true
 		}
 	}
 
 	return hasUpper && hasLower && hasDigit && hasSpecial
+}
+
+func isValidPIN(pin string) bool {
+	re := regexp.MustCompile(`^\d{5}$`)
+	return re.MatchString(pin)
 }
 
 // ValidatePhoneNumber checks if a phone number is valid based on specific prefixes and length.
@@ -144,8 +199,7 @@ func ValidatePhoneNumber(phone string) (bool, error) {
 		return false, errors.New("invalid phone number format or prefix")
 	}
 
-	// Additional logic could go here, such as checking if the number is in a blacklist
-
+	// Additional validation logic can be added here
 	return true, nil
 }
 
@@ -164,6 +218,7 @@ type ApiKey struct {
 	ID        int64     `json:"id"`
 	Key       string    `json:"key" validate:"required,min=32"`
 	ClientID  string    `json:"client_id" validate:"required"`
+	Status    int       `json:"Status"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -189,10 +244,12 @@ type SSOSession struct {
 
 // MFAMethod represents a Multi-Factor Authentication method for a user
 type MFAMethod struct {
-	ID          int64  `json:"id"`
-	UserID      int64  `json:"user_id" validate:"required"`
-	Method      string `json:"method" validate:"required,oneof=sms email authenticator"`
-	Destination string `json:"destination" validate:"required"`
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id" validate:"required"`
+	Method      string    `json:"method" validate:"required,oneof=sms email authenticator"`
+	Destination string    `json:"destination" validate:"required"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // PasswordAuth represents a password-based authentication record
@@ -210,18 +267,12 @@ type Biometric struct {
 	UserID        int64     `json:"user_id" validate:"required"`
 	BiometricHash string    `json:"biometric_hash" validate:"required"`
 	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"UpdatedAt"`
+	Method        string    `json:"method" validate:"required"` // e.g., fingerprint, facial recognition
+	Data          string    `json:"data" validate:"required"`   // The actual biometric data (e.g., template, image)
 }
 
 // Session represents a session for user access control
-type Session struct {
-	ID          int64     `json:"id"`
-	UserID      int64     `json:"user_id" validate:"required"`
-	SessionID   string    `json:"session_id" validate:"required,min=32"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	SessionData []string  `json:"session_data" validate:"required"` // New field for storing multiple session data
-}
-
 type Session struct {
 	ID           int64     `json:"id"`
 	UserID       int64     `json:"user_id"`
@@ -234,13 +285,16 @@ type Session struct {
 }
 
 type SessionData struct {
-	ParentID      int64  `json:"parent_id"`
-	OrgID         int64  `json:"org_id"`
-	AddrID        int64  `json:"addr_id"`
-	AccountNumber string `json:"account_number"`
-	DistributorID int64  `json:"distributor_id"`
-	EmailAddress  string `json:"email_address"`
-	SystemName    string `json:"system_name"`
+	ParentID      int64
+	OrgID         int64
+	AddrID        int64
+	AccountNumber string
+	DistributorID int64
+	EmailAddress  string
+	SystemName    string
+	UserPhone     string // Optional for mobile login
+	Key           string `json:"sesKey"`
+	Value         string `json:"sesVal"`
 }
 
 // RefreshToken represents a token used to refresh user sessions
@@ -270,32 +324,120 @@ type LoginAttempt struct {
 	IPAddress string    `json:"ip_address" validate:"required,ipv4|ipv6"`
 }
 
-// AuthEventLog records important authentication-related events
-type AuthEventLog struct {
-	ID        int64     `json:"id"`
-	UserID    int64     `json:"user_id" validate:"required"`
-	Event     string    `json:"event" validate:"required"`
-	Timestamp time.Time `json:"timestamp" validate:"required"`
-	IPAddress string    `json:"ip_address" validate:"required,ipv4|ipv6"`
+type LoginRequest struct {
+	APIKey        string `json:"api_key"`
+	Token         string `json:"token,omitempty"`
+	UserName      string `json:"UserName,omitempty"`
+	LoginModeType string `json:"login_mode_type"`
+	UserAccount   string `json:"user_account,omitempty"`
+	UserPassword  string `json:"user_password,omitempty"`
+	UserPhone     string `json:"user_phone,omitempty"`
+	UserPin       string `json:"user_pin,omitempty"`
 }
 
 // Getter and Setter or SessionData value
-// Convert map to JSON string for storage
-func (s *Session) SetSessionData(data map[string]interface{}) error {
+func (s *Session) SetSessionData(data SessionData) error {
+	// Marshal the SessionData struct into a JSON string
 	serializedData, err := json.Marshal(data)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal session data: %w", err)
 	}
-	s.SessionData = string(serializedData)
+
+	// Append the serialized data to the SessionData field
+	s.SessionData = append(s.SessionData, string(serializedData))
 	return nil
 }
 
 // Convert JSON string back to map
 func (s *Session) GetSessionData() (map[string]interface{}, error) {
-	var data map[string]interface{}
-	err := json.Unmarshal([]byte(s.SessionData), &data)
-	if err != nil {
-		return nil, err
+	// Initialize the map to store the combined session data
+	data := make(map[string]interface{})
+
+	// Iterate over each string in SessionData (which is a []string)
+	for _, sessionDataStr := range s.SessionData {
+		// Temporary map for unmarshalling each session data string
+		var tempData map[string]interface{}
+		err := json.Unmarshal([]byte(sessionDataStr), &tempData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal session data: %w", err)
+		}
+
+		// Merge tempData into the main data map
+		for key, value := range tempData {
+			data[key] = value
+		}
 	}
+
 	return data, nil
+}
+
+type APIError struct {
+	Code    int
+	Message string
+}
+
+// LoginResponse represents the response payload for login.
+type LoginResponse struct {
+	Success      bool   `json:"success"`
+	Message      string `json:"message"`
+	SystemName   string `json:"systemName,omitempty"`
+	SessionToken string `json:"sessionToken,omitempty"`
+}
+
+// Recognized login mode types
+var validLoginModes = map[string]bool{
+	"web":  true,
+	"mob":  true,
+	"desk": true,
+	"iot":  true,
+	"tv":   true,
+	"tab":  true,
+}
+
+type rWeb struct {
+	SessionToken string `json:"SessionToken"`
+	APIKey       string `json:"APIKey"`
+	UserName     string `json:"UserName"`
+	UserPassword string `json:"UserPassword"`
+	LoginMode    string `json:"LoginMode"`
+}
+
+type rMobile struct {
+	SessionToken       string `json:"SessionToken"`
+	SessionTokenExpire string `json:"SessionTokenExpire"`
+	APIKey             string `json:"APIKey"`
+	UserPhone          string `json:"UserPhone"`
+	UserPIN            string `json:"UserPIN"`
+	LoginMode          string `json:"LoginMode"`
+}
+
+type rDesktop struct {
+	SessionToken       string `json:"SessionToken"`
+	SessionTokenExpire string `json:"SessionTokenExpire"`
+	APIKey             string `json:"APIKey"`
+	UserName           string `json:"UserName"`
+	UserPassword       string `json:"UserPassword"`
+	LoginMode          string `json:"LoginMode"`
+}
+
+type rIOT struct {
+	SessionToken       string `json:"SessionToken"`
+	SessionTokenExpire string `json:"SessionTokenExpire"`
+	APIKey             string `json:"api_key"`
+	UserPhone          string `json:"UserPhone"`
+	UserPIN            string `json:"UserPIN"`
+	LoginMode          string `json:"LoginMode"`
+	DeviceID           string `json:"DeviceID"`
+	AddressID          string `json:"AddressID"`
+}
+
+type rTV struct {
+	SessionToken       string `json:"SessionToken"`
+	SessionTokenExpire string `json:"SessionTokenExpire"`
+	APIKey             string `json:"APIKey"`
+	UserName           string `json:"UserName"`
+	UserPassword       string `json:"UserPassword"`
+	LoginMode          string `json:"LoginMode"`
+	DeviceID           string `json:"DeviceID"`
+	AddressID          string `json:"AddressID"`
 }
